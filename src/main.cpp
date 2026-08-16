@@ -130,6 +130,9 @@ void setup()
         Serial.print("Failed to change the boot partition to: ");
       }
       Serial.println(next_partition->label);
+      Serial.println("Rebooting into new firmware...");
+      delay(2000);
+      esp_restart();
     }
     else
     {
