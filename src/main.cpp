@@ -2,11 +2,13 @@
 #include "esp_ota_ops.h"
 #include <SPI.h>
 #include <HTTPClient.h>
+#include <esp_rom_crc.h>
 
 char ssid[] = "PARTH";
 char pass[] = "iamparth";
 
 char server[] = "http://172.31.202.151:8000/firmware.bin";
+char checksum[] = "http://172.31.202.151:8000/firmware.crc32";
 
 esp_ota_handle_t handler;
 void setup()
@@ -30,15 +32,27 @@ void setup()
 
   HTTPClient http;
 
+  // Receiving Checksum number
+  http.begin(checksum);
+  uint32_t original_crc = 0;
+
+  if (http.GET() > 0)
+  {
+    original_crc = strtoul(http.getString().c_str(), NULL, 10);
+  }
+  else
+  {
+    Serial.println("Unable to receive checksum");
+    return;
+  }
+
+  // Initiating OTA Update
   http.begin(server);
 
   int httpResponseCode = http.GET();
-
+  uint32_t crc = ~0xFFFFFFFF;
   if (httpResponseCode > 0)
   {
-    Serial.print("HTTP Response code: ");
-    Serial.println(httpResponseCode);
-
     int len = http.getSize();
 
     const esp_partition_t *next_partition = esp_ota_get_next_update_partition(NULL);
@@ -84,6 +98,7 @@ void setup()
           if (len > 0)
             len -= c;
 
+          crc = esp_rom_crc32_le(crc, buffer, bytes_to_read);
           // double progress = ((double)downloaded / total_size) * 100.0;
           // Serial.printf("Downloaded: %u / %u bytes (%.2f%%)\n", downloaded, total_size, progress);
         }
@@ -91,12 +106,20 @@ void setup()
 
       delay(1);
     }
-    Serial.println("");
+    Serial.printf("Original CRC: %u\n", original_crc);
+    Serial.printf("Final CRC: %u\n", crc);
 
     esp_err_t ota_end_result = esp_ota_end(handler);
+
     if (ota_end_result == ESP_OK)
     {
       Serial.println("Firmware successfully downloaded");
+
+      if (original_crc != crc)
+      {
+        Serial.println("Original CRC and Received File CRC found different");
+        return;
+      }
 
       if (esp_ota_set_boot_partition(next_partition) == ESP_OK)
       {
