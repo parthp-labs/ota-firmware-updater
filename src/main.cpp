@@ -32,11 +32,7 @@ void setup()
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
 
-  updater.check_for_update();
-  updater.download_checksum();
-  updater.download_firmware();
-  updater.verify_checksum();
-  updater.change_bootorder();
+  updater.start_ota_update_sequence(true);
 }
 
 void loop()

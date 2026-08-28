@@ -20,18 +20,18 @@ OTAUpdater::OTAUpdater(std::string firmware_url, std::string checksum_url, std::
 
 bool OTAUpdater::check_for_update()
 {
-    // HTTPClient http;
+    HTTPClient http;
 
-    // http.begin(this->check_update_url.c_str());
+    http.begin(this->check_update_url.c_str());
 
-    // if (http.GET() <= 0)
-    // {
-    //     Serial.println("Unable to check for update");
-    //     return 0;
-    // }
+    if (http.GET() <= 0)
+    {
+        Serial.println("Unable to check for update");
+        return 0;
+    }
 
-    // String payload = http.getString();
-    // Serial.println(payload);
+    String payload = http.getString();
+    Serial.println(payload);
 
     this->update_available = true;
     Serial.println("Update available");
@@ -83,6 +83,7 @@ void OTAUpdater::download_firmware()
         return;
     };
 
+    // Checking if update is available
     if (!update_available)
     {
         Serial.println("Update not available");
@@ -99,7 +100,9 @@ void OTAUpdater::download_firmware()
 
         int len = http.getSize();
 
+        // Getting next partition
         const esp_partition_t *next_partition = esp_ota_get_next_update_partition(NULL);
+
         esp_err_t ota_begin_result = esp_ota_begin(next_partition, len, &handler);
 
         if (ota_begin_result != ESP_OK)
@@ -165,6 +168,7 @@ void OTAUpdater::download_firmware()
 void OTAUpdater::change_bootorder()
 {
     Serial.println("Changing boot partition");
+
     const esp_partition_t *next_partition = esp_ota_get_next_update_partition(NULL);
     esp_err_t boot_partition_change_result = esp_ota_set_boot_partition(next_partition);
 
@@ -175,4 +179,25 @@ void OTAUpdater::change_bootorder()
     }
     Serial.print("Boot partition changed to: ");
     Serial.println(next_partition->label);
+}
+
+void OTAUpdater::start_ota_update_sequence(bool change_order, bool reboot)
+{
+    Serial.println("Starting OTA Update Sequence");
+    check_for_update();
+    download_checksum();
+    download_firmware();
+    verify_checksum();
+
+    if (change_order)
+    {
+        change_bootorder();
+    }
+
+    if (reboot)
+    {
+        ESP.restart();
+    }
+
+    Serial.println("OTA Update Sequence successful");
 }

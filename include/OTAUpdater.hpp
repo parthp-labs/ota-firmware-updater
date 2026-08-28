@@ -20,4 +20,5 @@ public:
     void download_firmware();
     bool verify_checksum();
     void change_bootorder();
+    void start_ota_update_sequence(bool change_boot_order = false, bool reboot = false);
 };
