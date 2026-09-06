@@ -16,182 +16,196 @@ OTAUpdater::OTAUpdater(std::string firmware_url, std::string checksum_url, std::
     this->original_checksum = -1;
     this->firmware_checksum = -1;
     this->update_available = false;
+
+    if (esp_efuse_mac_get_default(&(this->device_mac)) != ESP_OK)
+    {
+        this->device_mac = -1;
+    }
 };
 
-bool OTAUpdater::check_for_update()
+OTAResult OTAUpdater::check_wifi()
 {
-    HTTPClient http;
+    if (WiFi.isConnected())
+    {
+        return OTAResult::OK;
+    }
 
+    return OTAResult::WIFI_NOT_CONNECTED;
+}
+
+OTAResult OTAUpdater::check_for_update()
+{
+    if (!WiFi.isConnected())
+    {
+        return OTAResult::WIFI_NOT_CONNECTED;
+    }
+
+    HTTPClient http;
+    http.addHeader("Authorization", "Bearer 5556273209c07bc50627abfe9fd914d0ee4edf7743ce2f50451f91007fcce3b8");
     http.begin(this->check_update_url.c_str());
 
     if (http.GET() <= 0)
     {
-        Serial.println("Unable to check for update");
-        return 0;
+        return OTAResult::HTTP_ERROR;
     }
 
     String payload = http.getString();
     Serial.println(payload);
 
     this->update_available = true;
-    Serial.println("Update available");
-    return 0;
+
+    if (!this->update_available)
+    {
+        return OTAResult::NO_UPDATE_AVAILABLE;
+    }
+
+    return OTAResult::OK;
 }
 
-bool OTAUpdater::verify_checksum()
+OTAResult OTAUpdater::verify_checksum()
 {
     if (this->original_checksum != this->firmware_checksum)
     {
-        Serial.println("Checksums are not identical");
-        return false;
+        return OTAResult::CHECKSUM_MISMATCH;
     }
-    Serial.println("Checksum matched");
-    return true;
+
+    return OTAResult::OK;
 }
 
-void OTAUpdater::download_checksum()
+OTAResult OTAUpdater::download_checksum()
 {
-    Serial.println("Downloading checksum");
-
     if (!WiFi.isConnected())
     {
-        Serial.println("Wifi not connected");
-        return;
-    };
+        return OTAResult::WIFI_NOT_CONNECTED;
+    }
 
     HTTPClient http;
     http.begin(this->checksum_url.c_str());
 
-    if (http.GET() > 0)
+    if (http.GET() < 0)
     {
-        this->original_checksum = strtoul(http.getString().c_str(), NULL, 10);
-    }
-    else
-    {
-        Serial.println("Error receiving checksum");
-        return;
+        return OTAResult::CHECKSUM_DOWNLOAD_FAILED;
     }
 
-    Serial.println("Checksum download completed");
+    this->original_checksum = strtoul(http.getString().c_str(), NULL, 10);
+
+    return OTAResult::OK;
 };
 
-void OTAUpdater::download_firmware()
+OTAResult OTAUpdater::download_firmware()
 {
     if (!WiFi.isConnected())
     {
-        Serial.println("Wifi not connected");
-        return;
-    };
+        return OTAResult::WIFI_NOT_CONNECTED;
+    }
 
     // Checking if update is available
-    if (!update_available)
+    if (check_for_update() != OTAResult::OK)
     {
-        Serial.println("Update not available");
-        return;
+        return OTAResult::NO_UPDATE_AVAILABLE;
     }
 
     HTTPClient http;
-
     http.begin(this->firmware_url.c_str());
 
-    if (http.GET() > 0)
+    if (http.GET() <= 0)
     {
-        this->firmware_checksum = ~0xFFFFFFFF;
+        return OTAResult::FIRMWARE_REQUEST_FAILED;
+    }
 
-        int len = http.getSize();
+    this->firmware_checksum = ~0xFFFFFFFF;
+    int len = http.getSize();
 
-        // Getting next partition
-        const esp_partition_t *next_partition = esp_ota_get_next_update_partition(NULL);
+    // Getting next partition
+    const esp_partition_t *next_partition = esp_ota_get_next_update_partition(NULL);
+    esp_err_t ota_begin_result = esp_ota_begin(next_partition, len, &handler);
 
-        esp_err_t ota_begin_result = esp_ota_begin(next_partition, len, &handler);
+    if (ota_begin_result != ESP_OK)
+    {
+        return OTAResult::OTA_BEGIN_FAILED;
+    }
 
-        if (ota_begin_result != ESP_OK)
+    WiFiClient *stream = http.getStreamPtr();
+    uint8_t buffer[1024] = {0};
+
+    size_t downloaded = 0;
+
+    while (http.connected() && (len > 0 || len == -1))
+    {
+        size_t available_bytes = stream->available();
+
+        if (available_bytes)
         {
-            Serial.println("Fail to begin ota");
-            return;
-        }
+            size_t bytes_to_read = min(available_bytes, sizeof(buffer));
+            int c = stream->readBytes(buffer, bytes_to_read);
 
-        WiFiClient *stream = http.getStreamPtr();
-        uint8_t buffer[1024] = {0};
-
-        Serial.println("Downloading firmware...");
-        size_t downloaded = 0;
-
-        while (http.connected() && (len > 0 || len == -1))
-        {
-            size_t available_bytes = stream->available();
-
-            if (available_bytes)
+            if (c > 0)
             {
-                size_t bytes_to_read = min(available_bytes, sizeof(buffer));
-                int c = stream->readBytes(buffer, bytes_to_read);
+                esp_err_t chunk_result = esp_ota_write(handler, buffer, c);
 
-                if (c > 0)
+                if (chunk_result != ESP_OK)
                 {
-                    esp_err_t chunk_result = esp_ota_write(handler, buffer, c);
-
-                    if (chunk_result != ESP_OK)
-                    {
-                        Serial.printf("OTA write failed: %s\n", esp_err_to_name(chunk_result));
-                        esp_ota_end(handler);
-                        return;
-                    }
-                    downloaded += c;
-
-                    if (len > 0)
-                        len -= c;
-
-                    this->firmware_checksum = esp_rom_crc32_le(this->firmware_checksum, buffer, bytes_to_read);
+                    esp_ota_end(handler);
+                    return OTAResult::OTA_WRITE_FAILED;
                 }
+                downloaded += c;
+
+                if (len > 0)
+                    len -= c;
+
+                this->firmware_checksum = esp_rom_crc32_le(this->firmware_checksum, buffer, bytes_to_read);
             }
-            delay(1);
         }
-
-        esp_err_t ota_end_result = esp_ota_end(handler);
-
-        if (ota_end_result != ESP_OK)
-        {
-            Serial.println("Failed to end OTA");
-            return;
-        }
-        Serial.println("OTA end success");
+        delay(1);
     }
-    else
+
+    esp_err_t ota_end_result = esp_ota_end(handler);
+
+    if (ota_end_result != ESP_OK)
     {
-        Serial.println("Error receiving firmware");
-        return;
+        return OTAResult::OTA_END_FAILED;
     }
 
-    Serial.println("Firmware downloading completed");
+    return OTAResult::OK;
 }
 
-void OTAUpdater::change_bootorder()
+OTAResult OTAUpdater::change_bootorder()
 {
-    Serial.println("Changing boot partition");
-
     const esp_partition_t *next_partition = esp_ota_get_next_update_partition(NULL);
     esp_err_t boot_partition_change_result = esp_ota_set_boot_partition(next_partition);
 
     if (boot_partition_change_result != ESP_OK)
     {
-        Serial.println("Failed to change the boot partition");
-        return;
+        return OTAResult::BOOT_PARTITION_CHANGE_FAILED;
     }
-    Serial.print("Boot partition changed to: ");
-    Serial.println(next_partition->label);
+    return OTAResult::OK;
 }
 
-void OTAUpdater::start_ota_update_sequence(bool change_order, bool reboot)
+OTAResult OTAUpdater::start_ota_update_sequence(bool change_order, bool reboot)
 {
-    Serial.println("Starting OTA Update Sequence");
-    check_for_update();
-    download_checksum();
-    download_firmware();
-    verify_checksum();
+    OTAResult result;
+
+    result = check_for_update();
+    if (result != OTAResult::OK)
+        return result;
+
+    result = download_checksum();
+    if (result != OTAResult::OK)
+        return result;
+
+    result = download_firmware();
+    if (result != OTAResult::OK)
+        return result;
+
+    result = verify_checksum();
+    if (result != OTAResult::OK)
+        return result;
 
     if (change_order)
     {
-        change_bootorder();
+        result = change_bootorder();
+        if (result != OTAResult::OK)
+            return result;
     }
 
     if (reboot)
@@ -199,5 +213,5 @@ void OTAUpdater::start_ota_update_sequence(bool change_order, bool reboot)
         ESP.restart();
     }
 
-    Serial.println("OTA Update Sequence successful");
+    return OTAResult::OK;
 }
