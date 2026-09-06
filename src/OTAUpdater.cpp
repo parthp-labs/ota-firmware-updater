@@ -5,6 +5,7 @@
 #include <HTTPClient.h>
 #include <esp_ota_ops.h>
 #include <esp_rom_crc.h>
+#include <ArduinoJson.h>
 
 esp_ota_handle_t handler;
 
@@ -41,24 +42,47 @@ OTAResult OTAUpdater::check_for_update()
     }
 
     HTTPClient http;
-    http.addHeader("Authorization", "Bearer 5556273209c07bc50627abfe9fd914d0ee4edf7743ce2f50451f91007fcce3b8");
+    // When http.begin() is called, esp32 internally clears all the internal states, hence header is also removed, so call addHeader after begin
     http.begin(this->check_update_url.c_str());
+    http.addHeader("Authorization", "Bearer 5556273209c07bc50627abfe9fd914d0ee4edf7743ce2f50451f91007fcce3b8");
 
-    if (http.GET() <= 0)
-    {
-        return OTAResult::HTTP_ERROR;
-    }
+    JsonDocument response;
+    int result = http.GET();
 
     String payload = http.getString();
-    Serial.println(payload);
+    DeserializationError error = deserializeJson(response, payload);
 
-    this->update_available = true;
-
-    if (!this->update_available)
+    if (error)
     {
-        return OTAResult::NO_UPDATE_AVAILABLE;
+        Serial.print("Parsing failed: ");
+        Serial.println(error.c_str());
+        return OTAResult::PARSING_ERROR;
     }
 
+    String message = response["message"];
+    switch (result)
+    {
+    case 200:
+    {
+        this->update_available = response["update_available"];
+        this->original_checksum = response["crc32"];
+
+        if (this->update_available)
+        {
+            return OTAResult::OK;
+        }
+        return OTAResult::NO_UPDATE_AVAILABLE;
+    }
+    case 401:
+    {
+        return OTAResult::INVALID_API_KEY;
+    }
+    default:
+    {
+        Serial.println(message);
+        return OTAResult::HTTP_ERROR;
+    }
+    }
     return OTAResult::OK;
 }
 
@@ -107,66 +131,84 @@ OTAResult OTAUpdater::download_firmware()
 
     HTTPClient http;
     http.begin(this->firmware_url.c_str());
+    http.addHeader("Authorization", "Bearer 5556273209c07bc50627abfe9fd914d0ee4edf7743ce2f50451f91007fcce3b8");
 
-    if (http.GET() <= 0)
+    JsonDocument response;
+    int result = http.GET();
+
+    String payload = http.getString();
+    DeserializationError error = deserializeJson(response, payload);
+
+    switch (result)
     {
-        return OTAResult::FIRMWARE_REQUEST_FAILED;
-    }
-
-    this->firmware_checksum = ~0xFFFFFFFF;
-    int len = http.getSize();
-
-    // Getting next partition
-    const esp_partition_t *next_partition = esp_ota_get_next_update_partition(NULL);
-    esp_err_t ota_begin_result = esp_ota_begin(next_partition, len, &handler);
-
-    if (ota_begin_result != ESP_OK)
+    case 200:
     {
-        return OTAResult::OTA_BEGIN_FAILED;
-    }
+        this->firmware_checksum = ~0xFFFFFFFF;
+        int len = http.getSize();
 
-    WiFiClient *stream = http.getStreamPtr();
-    uint8_t buffer[1024] = {0};
+        // Getting next partition
+        const esp_partition_t *next_partition = esp_ota_get_next_update_partition(NULL);
+        esp_err_t ota_begin_result = esp_ota_begin(next_partition, len, &handler);
 
-    size_t downloaded = 0;
-
-    while (http.connected() && (len > 0 || len == -1))
-    {
-        size_t available_bytes = stream->available();
-
-        if (available_bytes)
+        if (ota_begin_result != ESP_OK)
         {
-            size_t bytes_to_read = min(available_bytes, sizeof(buffer));
-            int c = stream->readBytes(buffer, bytes_to_read);
-
-            if (c > 0)
-            {
-                esp_err_t chunk_result = esp_ota_write(handler, buffer, c);
-
-                if (chunk_result != ESP_OK)
-                {
-                    esp_ota_end(handler);
-                    return OTAResult::OTA_WRITE_FAILED;
-                }
-                downloaded += c;
-
-                if (len > 0)
-                    len -= c;
-
-                this->firmware_checksum = esp_rom_crc32_le(this->firmware_checksum, buffer, bytes_to_read);
-            }
+            return OTAResult::OTA_BEGIN_FAILED;
         }
-        delay(1);
+
+        WiFiClient *stream = http.getStreamPtr();
+        uint8_t buffer[1024] = {0};
+
+        size_t downloaded = 0;
+
+        while (http.connected() && (len > 0 || len == -1))
+        {
+            size_t available_bytes = stream->available();
+
+            if (available_bytes)
+            {
+                size_t bytes_to_read = min(available_bytes, sizeof(buffer));
+                int c = stream->readBytes(buffer, bytes_to_read);
+
+                if (c > 0)
+                {
+                    esp_err_t chunk_result = esp_ota_write(handler, buffer, c);
+
+                    if (chunk_result != ESP_OK)
+                    {
+                        esp_ota_end(handler);
+                        return OTAResult::OTA_WRITE_FAILED;
+                    }
+                    downloaded += c;
+
+                    if (len > 0)
+                        len -= c;
+
+                    this->firmware_checksum = esp_rom_crc32_le(this->firmware_checksum, buffer, bytes_to_read);
+                }
+            }
+            delay(1);
+        }
+
+        esp_err_t ota_end_result = esp_ota_end(handler);
+        if (ota_end_result != ESP_OK)
+        {
+            return OTAResult::OTA_END_FAILED;
+        }
+
+        return OTAResult::OK;
     }
-
-    esp_err_t ota_end_result = esp_ota_end(handler);
-
-    if (ota_end_result != ESP_OK)
+    case 404:
     {
-        return OTAResult::OTA_END_FAILED;
+        return OTAResult::FIRMWARE_NOT_FOUND;
+        break;
     }
-
-    return OTAResult::OK;
+    default:
+    {
+        Serial.println(payload);
+        return OTAResult::FIRMWARE_REQUEST_FAILED;
+        break;
+    }
+    }
 }
 
 OTAResult OTAUpdater::change_bootorder()
