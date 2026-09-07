@@ -9,7 +9,7 @@
 
 esp_ota_handle_t handler;
 
-OTAUpdater::OTAUpdater(std::string firmware_url, std::string checksum_url, std::string check_update_url)
+OTAUpdater::OTAUpdater(std::string firmware_url, std::string checksum_url, std::string check_update_url, std::string api_key)
 {
     this->firmware_url = firmware_url;
     this->checksum_url = checksum_url;
@@ -17,6 +17,8 @@ OTAUpdater::OTAUpdater(std::string firmware_url, std::string checksum_url, std::
     this->original_checksum = -1;
     this->firmware_checksum = -1;
     this->update_available = false;
+    this->api_key = api_key;
+    this->auth_header = "Bearer " + this->api_key;
 
     if (esp_efuse_mac_get_default(&(this->device_mac)) != ESP_OK)
     {
@@ -44,7 +46,8 @@ OTAResult OTAUpdater::check_for_update()
     HTTPClient http;
     // When http.begin() is called, esp32 internally clears all the internal states, hence header is also removed, so call addHeader after begin
     http.begin(this->check_update_url.c_str());
-    http.addHeader("Authorization", "Bearer 5556273209c07bc50627abfe9fd914d0ee4edf7743ce2f50451f91007fcce3b8");
+    Serial.println(this->auth_header.c_str());
+    http.addHeader("Authorization", this->auth_header.c_str());
 
     JsonDocument response;
     int result = http.GET();
@@ -131,7 +134,7 @@ OTAResult OTAUpdater::download_firmware()
 
     HTTPClient http;
     http.begin(this->firmware_url.c_str());
-    http.addHeader("Authorization", "Bearer 5556273209c07bc50627abfe9fd914d0ee4edf7743ce2f50451f91007fcce3b8");
+    http.addHeader("Authorization", this->auth_header.c_str());
 
     JsonDocument response;
     int result = http.GET();

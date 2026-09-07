@@ -31,10 +31,12 @@ private:
     uint8_t device_mac;
     uint32_t original_checksum;
     uint32_t firmware_checksum;
+    std::string api_key;
+    std::string auth_header;
     bool update_available;
 
 public:
-    OTAUpdater(std::string firmware_url, std::string checksum_url, std::string check_update_url);
+    OTAUpdater(std::string firmware_url, std::string checksum_url, std::string check_update_url, std::string api_key);
     OTAResult check_wifi();
     OTAResult check_for_update();
     OTAResult download_checksum();
